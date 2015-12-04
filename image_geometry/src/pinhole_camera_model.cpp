@@ -21,6 +21,9 @@ struct PinholeCameraModel::Cache
   mutable bool rectified_roi_dirty;
   mutable cv::Rect rectified_roi;
 
+  mutable cv::gpu::GpuMat gpu_reduced_map1;
+  mutable cv::gpu::GpuMat gpu_reduced_map2;
+
   Cache()
     : full_maps_dirty(true),
       reduced_maps_dirty(true),
@@ -279,13 +282,18 @@ void PinholeCameraModel::rectifyImage(const cv::Mat& raw, cv::Mat& rectified, in
 {
   assert( initialized() );
 
+  cv::gpu::GpuMat gpu_raw;
+  cv::gpu::GpuMat gpu_rectified;
+
   switch (cache_->distortion_state) {
     case NONE:
       raw.copyTo(rectified);
       break;
     case CALIBRATED:
       initRectificationMaps();
-      cv::remap(raw, rectified, cache_->reduced_map1, cache_->reduced_map2, interpolation);
+      gpu_raw.upload(raw);
+      cv::gpu::remap(gpu_raw, gpu_rectified, cache_->gpu_reduced_map1, cache_->gpu_reduced_map2, interpolation);
+      gpu_rectified.download(rectified);
       break;
     default:
       assert(cache_->distortion_state == UNKNOWN);
@@ -428,9 +436,9 @@ void PinholeCameraModel::initRectificationMaps() const
       }
     }
     
-    // Note: m1type=CV_16SC2 to use fast fixed-point maps (see cv::remap)
+    // Note: m1type=CV_32FC1 mandatory (see gpu::remap)
     cv::initUndistortRectifyMap(K_binned, D_, R_, P_binned, binned_resolution,
-                                CV_16SC2, cache_->full_map1, cache_->full_map2);
+                                CV_32FC1, cache_->full_map1, cache_->full_map2);
     cache_->full_maps_dirty = false;
   }
 
@@ -450,11 +458,15 @@ void PinholeCameraModel::initRectificationMaps() const
       roi.height /= binningY();
       cache_->reduced_map1 = cache_->full_map1(roi) - cv::Scalar(roi.x, roi.y);
       cache_->reduced_map2 = cache_->full_map2(roi);
+      cache_->gpu_reduced_map1.upload(cache_->reduced_map1);
+      cache_->gpu_reduced_map2.upload(cache_->reduced_map2);
     }
     else {
       // Otherwise we're rectifying the full image
       cache_->reduced_map1 = cache_->full_map1;
       cache_->reduced_map2 = cache_->full_map2;
+      cache_->gpu_reduced_map1.upload(cache_->reduced_map1);
+      cache_->gpu_reduced_map2.upload(cache_->reduced_map2);
     }
     cache_->reduced_maps_dirty = false;
   }
